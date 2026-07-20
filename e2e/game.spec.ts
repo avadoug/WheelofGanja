@@ -155,7 +155,7 @@ test("one request produces one angle-locked spin and waits for its letter", asyn
   await spin.evaluate((button) => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
   await expect(page.getByText(/the wheel is spinning/i).first()).toBeVisible();
   await expect(spin).toBeDisabled();
-  await expect(page.getByText(/landed on: 500 grow points/i)).toBeVisible({ timeout: 6_000 });
+  await expect(page.getByRole("heading", { name: /landed on: 500 grow points/i })).toBeVisible({ timeout: 6_000 });
   const stopped = await wheel.getAttribute("style");
   expect(stopped).not.toBe(before);
   await page.waitForTimeout(650);
@@ -164,6 +164,21 @@ test("one request produces one angle-locked spin and waits for its letter", asyn
   await expect(page.getByRole("button", { name: /choose a consonant/i })).toBeDisabled();
   await page.locator(".letter-picker button").first().click();
   await expect(page.getByText(/result resolved|your turn|waiting for/i).first()).toBeVisible({ timeout: 5_000 });
+});
+
+test("Terpene Tina takes an automated spin after the human turn ends", async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await page.addInitScript(() => { Math.random = () => 0; });
+  await startGame(page);
+  const answer = await savedAnswer(page);
+  const missingConsonant = "BCDFGHJKLMNPQRSTVWXYZ".split("").find((letter) => !answer.includes(letter));
+  expect(missingConsonant).toBeTruthy();
+
+  await page.getByRole("button", { name: /spin the wheel/i }).click();
+  await expect(page.locator(".letter-picker")).toBeVisible({ timeout: 6_000 });
+  await page.getByRole("button", { name: missingConsonant!, exact: true }).click();
+  await expect(page.getByText(/waiting for Terpene Tina/i).first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText(/the wheel is spinning/i).first()).toBeVisible({ timeout: 5_000 });
 });
 
 test("every wedge is labeled and keyboard-inspectable", async ({ page }, testInfo) => {
