@@ -12,8 +12,9 @@ export const defaultSettings: AppSettings = {
   largeText: false,
   captions: true,
   animationSpeed: "quick",
+  presenterQuality: "full",
   vowelCost: 250,
-  audio: { master: true, music: false, host: true, character: true, wheel: true, audience: true, reveal: true, interface: true },
+  audio: { master: true, music: false, host: true, character: true, wheel: true, audience: true, reveal: true, interface: true, announcer: false },
 };
 
 export const defaultStats: GameStats = {
@@ -43,7 +44,10 @@ function safeRead<T>(key: string, fallback: T): T {
   }
 }
 
-export const loadSettings = () => safeRead(SETTINGS_KEY, defaultSettings);
+export const loadSettings = () => {
+  const loaded = safeRead(SETTINGS_KEY, defaultSettings);
+  return { ...defaultSettings, ...loaded, audio: { ...defaultSettings.audio, ...loaded.audio } };
+};
 export const loadStats = () => safeRead(STATS_KEY, defaultStats);
 export const loadPacks = () => safeRead<CustomPack[]>(PACKS_KEY, []);
 

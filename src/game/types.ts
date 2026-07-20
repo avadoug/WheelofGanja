@@ -18,6 +18,14 @@ export type GamePhase =
   | "bonus-result"
   | "paused";
 
+export type WheelState =
+  | "idle"
+  | "spinning"
+  | "resolving"
+  | "awaiting-letter"
+  | "awaiting-special-choice"
+  | "complete";
+
 export type GameMode =
   | "solo"
   | "local"
@@ -97,6 +105,7 @@ export interface AppSettings {
   largeText: boolean;
   captions: boolean;
   animationSpeed: "show" | "quick" | "instant";
+  presenterQuality: "full" | "reduced" | "static";
   vowelCost: number;
   audio: {
     master: boolean;
@@ -107,6 +116,7 @@ export interface AppSettings {
     audience: boolean;
     reveal: boolean;
     interface: boolean;
+    announcer: boolean;
   };
 }
 

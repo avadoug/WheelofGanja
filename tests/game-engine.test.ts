@@ -4,7 +4,7 @@ import { validateImportedPack, validatePuzzles } from "../src/cannabis/validatio
 import { aiCandidates, chooseAiLetter, chooseAiSolve } from "../src/game/ai";
 import { applyCompost, canBuyVowel, countLetter, createPlayers, isCorrectSolve, nextPlayerIndex, normalizeSolve, rewardForLetter, visiblePattern } from "../src/game/engine";
 import type { Player, Puzzle } from "../src/game/types";
-import { WEDGES, createSpin, getWedgeAtAngle, getWedgeIndex, normalizeAngle, wedgeAngle } from "../src/game/wheel";
+import { WEDGES, canRequestSpin, createSpin, createSpinLock, explainWedge, getWedgeAtAngle, getWedgeIndex, landedResultText, normalizeAngle, safeResumedWheelState, wedgeAngle, wheelLabelLines, wheelStateAfterLanding } from "../src/game/wheel";
 
 const sample: Puzzle = {
   id: "test-1",
@@ -52,6 +52,70 @@ describe("wheel physics and detection", () => {
   it("creates distinct outcomes from deterministic random inputs", () => {
     const outcomes = new Set([0.02, 0.18, 0.37, 0.59, 0.76, 0.94].map((value) => createSpin(0, value).wedge.id));
     expect(outcomes.size).toBeGreaterThan(3);
+  });
+
+  it("uses an immediate lock so rapid repeated requests create one spin", () => {
+    const lock = createSpinLock();
+    expect(lock.request()).toBe(true);
+    expect(lock.request()).toBe(false);
+    expect(lock.request()).toBe(false);
+    expect(lock.isLocked()).toBe(true);
+    lock.release();
+    expect(lock.request()).toBe(true);
+  });
+
+  it("rejects repeated keyboard-style requests while the first spin is active", () => {
+    const lock = createSpinLock();
+    const accepted = Array.from({ length: 12 }, () => lock.request()).filter(Boolean);
+    expect(accepted).toHaveLength(1);
+  });
+
+  it("permits spin only from the exact idle awaiting-action state", () => {
+    expect(canRequestSpin("idle", "awaiting-action", true)).toBe(true);
+    expect(canRequestSpin("spinning", "awaiting-action", true)).toBe(false);
+    expect(canRequestSpin("awaiting-letter", "awaiting-action", true)).toBe(false);
+    expect(canRequestSpin("idle", "selecting-consonant", true)).toBe(false);
+    expect(canRequestSpin("idle", "awaiting-action", false)).toBe(false);
+  });
+
+  it("sanitizes interrupted saved spins without duplicating the old action", () => {
+    expect(safeResumedWheelState("spinning")).toEqual({ phase: "awaiting-action", wheelState: "idle" });
+    expect(safeResumedWheelState("revealing")).toEqual({ phase: "awaiting-action", wheelState: "idle" });
+    expect(safeResumedWheelState("selecting-consonant")).toEqual({ phase: "selecting-consonant", wheelState: "awaiting-letter" });
+  });
+
+  it("gives every wedge a visible compact label and complete explanation", () => {
+    for (const wedge of WEDGES) {
+      const lines = wheelLabelLines(wedge);
+      const explanation = explainWedge(wedge);
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.length).toBeLessThanOrEqual(2);
+      expect(lines.every((line) => line.length > 0 && line.length <= 12)).toBe(true);
+      expect(explanation.title).toBe(wedge.label);
+      expect(explanation.summary.length).toBeGreaterThan(20);
+      expect(explanation.nextAction.length).toBeGreaterThan(5);
+    }
+  });
+
+  it("keeps the guide's active special kinds in exact sync with the wheel", () => {
+    const activeSpecials = new Set(WEDGES.filter((wedge) => wedge.kind !== "points").map((wedge) => wedge.kind));
+    expect(activeSpecials.size).toBe(13);
+    for (const wedge of WEDGES.filter((item) => item.kind !== "points")) expect(explainWedge(wedge).timing).toMatch(/Immediate|Choose next/);
+  });
+
+  it("routes every landed wedge to its required resolution state", () => {
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "points")!)).toBe("awaiting-letter");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "double")!)).toBe("awaiting-letter");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "free-vowel")!)).toBe("awaiting-special-choice");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "mystery")!)).toBe("awaiting-special-choice");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "risk")!)).toBe("awaiting-special-choice");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "compost")!)).toBe("resolving");
+    expect(wheelStateAfterLanding(WEDGES.find((wedge) => wedge.kind === "lost-turn")!)).toBe("resolving");
+  });
+
+  it("formats the visible result from the exact selected wedge", () => {
+    const spin = createSpin(0, 0.42);
+    expect(landedResultText(spin.wedge)).toBe(`Landed on: ${getWedgeAtAngle(spin.finalRotation).label}`);
   });
 });
 

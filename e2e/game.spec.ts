@@ -10,7 +10,7 @@ async function startGame(page: Page, options: { rounds?: number; mode?: string }
   await page.getByRole("button", { name: /light up the stage/i }).click();
   await expect(page.getByText(/tonight's contestants/i)).toBeVisible();
   await page.getByRole("button", { name: /begin quick clone/i }).click();
-  await expect(page.getByRole("button", { name: /spin the grow dial/i })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /spin the wheel/i })).toBeEnabled();
 }
 
 async function savedAnswer(page: Page) {
@@ -50,9 +50,9 @@ test("completes a normal round and reveals its educational note", async ({ page 
 
 test("hits Compost Pile through an angle-determined wheel spin", async ({ page }, testInfo) => {
   desktopOnly(testInfo);
-  await page.addInitScript(() => { Math.random = () => 0.935; });
+  await page.addInitScript(() => { Math.random = () => 0.06; });
   await startGame(page);
-  await page.getByRole("button", { name: /spin the grow dial/i }).click();
+  await page.getByRole("button", { name: /spin the wheel/i }).click();
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("ggs.stats.v2") || "{}").compostCount || 0), { timeout: 8_000 }).toBeGreaterThan(0);
 });
 
@@ -75,7 +75,7 @@ test("keeps the answer hidden after an incorrect solve", async ({ page }, testIn
   desktopOnly(testInfo);
   await startGame(page, { mode: "Terpene Sprint" });
   await solveCurrent(page, "NOT THE ANSWER");
-  await expect(page.getByText(/does not fit the board/i)).toBeVisible();
+  await expect(page.getByText(/does not fit the board/i).first()).toBeVisible();
   await expect(page.getByText(/knowledge unlocked/i)).toHaveCount(0);
 });
 
@@ -138,6 +138,42 @@ test("mobile layout exposes navigation plus board and wheel tabs", async ({ page
   await expect(page.getByRole("button", { name: /puzzle packs/i })).toBeVisible();
   await startGame(page);
   await expect(page.getByRole("button", { name: /puzzle board/i })).toBeVisible();
-  await page.getByRole("button", { name: /^spin wheel$/i }).click();
+  await page.getByRole("button", { name: /^view wheel$/i }).click();
   await expect(page.getByRole("img", { name: /prize wheel/i })).toBeVisible();
+  await expect(page.locator(".wheel__labels > button")).toHaveCount(18);
+  await page.getByRole("button", { name: /list view/i }).click();
+  await expect(page.locator(".wheel-list button")).toHaveCount(18);
+});
+
+test("one request produces one angle-locked spin and waits for its letter", async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await page.addInitScript(() => { Math.random = () => 0; });
+  await startGame(page);
+  const spin = page.locator(".action-button--spin");
+  const wheel = page.locator(".wheel");
+  const before = await wheel.getAttribute("style");
+  await spin.evaluate((button) => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
+  await expect(page.getByText(/the wheel is spinning/i).first()).toBeVisible();
+  await expect(spin).toBeDisabled();
+  await expect(page.getByText(/landed on: 500 grow points/i)).toBeVisible({ timeout: 6_000 });
+  const stopped = await wheel.getAttribute("style");
+  expect(stopped).not.toBe(before);
+  await page.waitForTimeout(650);
+  expect(await wheel.getAttribute("style")).toBe(stopped);
+  await expect(page.getByText(/choose one unused consonant/i).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /choose a consonant/i })).toBeDisabled();
+  await page.locator(".letter-picker button").first().click();
+  await expect(page.getByText(/result resolved|your turn|waiting for/i).first()).toBeVisible({ timeout: 5_000 });
+});
+
+test("every wedge is labeled and keyboard-inspectable", async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await startGame(page);
+  const wedges = page.locator(".wheel__labels > button");
+  await expect(wedges).toHaveCount(18);
+  for (let index = 0; index < 18; index += 1) {
+    await expect(wedges.nth(index)).not.toHaveText("");
+    await wedges.nth(index).focus();
+  }
+  await expect(page.getByRole("heading", { name: /wheel guide/i })).toBeVisible();
 });

@@ -6,8 +6,8 @@ import { pickPuzzle, puzzleCategories, puzzles, puzzlesForMode } from "../cannab
 import { validateImportedPack, validatePuzzles } from "../cannabis/validation";
 import { chooseAiLetter, chooseAiSolve } from "../game/ai";
 import { CONSONANTS, VOWELS, applyCompost, canBuyVowel, countLetter, createPlayers, isCorrectSolve, nextPlayerIndex, visiblePattern } from "../game/engine";
-import type { AppSettings, CustomPack, GameMode, GamePhase, GameStats, Player, Puzzle, Wedge } from "../game/types";
-import { WEDGES, createSpin } from "../game/wheel";
+import type { AppSettings, CustomPack, GameMode, GamePhase, GameStats, Player, Puzzle, Wedge, WheelState } from "../game/types";
+import { WEDGES, canRequestSpin, createSpin, createSpinLock, explainWedge, getWedgeIndex, safeResumedWheelState, wedgeAngle, wheelLabelLines } from "../game/wheel";
 import { SAVE_KEY, clearActiveGame, defaultSettings, defaultStats, loadActiveGame, loadPacks, loadSettings, loadStats, saveActiveGame, savePacks, saveSettings, saveStats } from "../storage/local";
 
 type View = "home" | "game" | "how" | "vault" | "packs" | "stats" | "about";
@@ -33,6 +33,7 @@ interface SavedGame {
   bonusPicks?: string[];
   bonusSeconds?: number;
   bonusResult?: "won" | "lost" | null;
+  wheelState?: WheelState;
 }
 
 const modeCards: { id: GameMode; label: string; eyebrow: string; description: string; icon: string }[] = [
@@ -113,13 +114,28 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function CharacterPortrait({ person, mood = "idle" }: { person: "bud" | "sativa"; mood?: string }) {
+const sativaLooks = [
+  { name: "Emerald Harvest", src: "/sativa-emerald-harvest.png" },
+  { name: "Purple Resin", src: "/sativa-purple-resin.png" },
+  { name: "Breeder Lab Couture", src: "/sativa-breeder-lab.png" },
+  { name: "Golden Trichome", src: "/sativa-golden-trichome.png" },
+  { name: "Ruby Premiere", src: "/sativa-starling.png" },
+] as const;
+
+function CharacterPortrait({ person, mood = "idle", round = 0, quality = "full" }: { person: "bud" | "sativa"; mood?: string; round?: number; quality?: AppSettings["presenterQuality"] }) {
+  const look = sativaLooks[round % sativaLooks.length];
   return (
-    <div className={`portrait portrait--${person} portrait--${mood}`} aria-hidden="true">
+    <div className={`portrait portrait--${person} portrait--${mood} portrait--quality-${quality}`} aria-hidden="true" data-outfit={person === "sativa" ? look.name : undefined}>
       <div className="portrait__halo" />
-      <div className="portrait__hair" />
-      <div className="portrait__head"><span /><i /></div>
-      <div className="portrait__body"><b /></div>
+      {person === "sativa" ? (
+        <img className="portrait__image" src={look.src} alt="" decoding="async" />
+      ) : (
+        <>
+          <div className="portrait__hair" />
+          <div className="portrait__head"><span /><i /></div>
+          <div className="portrait__body"><b /></div>
+        </>
+      )}
       <div className="portrait__spark">✦</div>
     </div>
   );
@@ -151,28 +167,54 @@ function PuzzleBoard({ answer, guessed, revealAll = false, freshLetter }: { answ
   );
 }
 
-function Wheel({ rotation, spinning }: { rotation: number; spinning: boolean }) {
+function Wheel({ rotation, spinning, selectedWedge, inspectedWedge, onInspect, durationMs }: { rotation: number; spinning: boolean; selectedWedge: Wedge | null; inspectedWedge: Wedge; onInspect: (wedge: Wedge) => void; durationMs: number }) {
   const gradient = WEDGES.map((wedge, index) => `${wedge.color} ${index * (360 / WEDGES.length)}deg ${(index + 1) * (360 / WEDGES.length)}deg`).join(",");
+  const selectedIndex = selectedWedge ? WEDGES.findIndex((wedge) => wedge.id === selectedWedge.id) : -1;
   return (
-    <div className={`wheel-stage ${spinning ? "is-spinning" : ""}`}>
+    <div className={`wheel-stage ${spinning ? "is-spinning" : ""} ${selectedIndex >= 0 && !spinning ? "has-selection" : ""}`} data-testid="wheel-stage">
       <div className="wheel-pointer" aria-hidden="true"><span /></div>
+      <div className="wheel-pointer-badge" aria-hidden="true">▼ POINTER</div>
       <div
         className="wheel"
-        style={{ background: `conic-gradient(from -10deg, ${gradient})`, transform: `rotate(${rotation}deg)` }}
+        style={{ background: `conic-gradient(from -${wedgeAngle / 2}deg, ${gradient})`, transform: `rotate(${rotation}deg)`, transitionDuration: `${durationMs}ms` }}
         role="img"
-        aria-label={spinning ? "The cannabis prize wheel is spinning" : "The cannabis prize wheel is ready"}
+        aria-label={spinning ? "The cannabis prize wheel is spinning. Controls are locked." : `Prize wheel stopped with ${selectedWedge?.label ?? WEDGES[getWedgeIndex(rotation)].label} beneath the pointer.`}
       >
-        <div className="wheel__labels" aria-hidden="true">
+        <div className="wheel__labels">
           {WEDGES.map((wedge, index) => (
-            <span key={wedge.id} style={{ transform: `rotate(${index * (360 / WEDGES.length) + (360 / WEDGES.length) / 2}deg)` }}>
-              <b>{wedge.symbol}</b><small>{wedge.shortLabel}</small>
-            </span>
+            <button
+              type="button"
+              className={`${selectedWedge?.id === wedge.id && !spinning ? "is-selected" : ""} ${inspectedWedge.id === wedge.id ? "is-inspected" : ""}`}
+              key={wedge.id}
+              style={{ color: wedge.textColor ?? "#fff", transform: `translateX(-50%) rotate(${index * wedgeAngle}deg)` }}
+              aria-label={`Inspect ${wedge.label}`}
+              aria-pressed={inspectedWedge.id === wedge.id}
+              onMouseEnter={() => onInspect(wedge)}
+              onFocus={() => onInspect(wedge)}
+              onClick={(event) => { event.stopPropagation(); onInspect(wedge); }}
+            >
+              <span className="wheel__label-content" style={{ transform: index * wedgeAngle > 90 && index * wedgeAngle < 270 ? "rotate(180deg)" : undefined }}><b>{wedge.symbol}</b><small className={wedge.shortLabel.length > 11 ? "is-long" : ""}>{wheelLabelLines(wedge).map((line) => <span key={line}>{line}</span>)}</small></span>
+            </button>
           ))}
         </div>
         <div className="wheel__hub"><span>GGS</span><small>GROW POINTS</small></div>
       </div>
+      {selectedIndex >= 0 && !spinning && <div className="wheel-selection-ring" aria-hidden="true"><span>SELECTED</span></div>}
       <div className="wheel-shadow" />
     </div>
+  );
+}
+
+function WheelGuide({ inspected, onInspect, listOpen, onToggleList }: { inspected: Wedge; onInspect: (wedge: Wedge) => void; listOpen: boolean; onToggleList: () => void }) {
+  const detail = explainWedge(inspected);
+  const specials = WEDGES.filter((wedge) => wedge.kind !== "points");
+  return (
+    <section className="wheel-guide" aria-labelledby="wheel-guide-title">
+      <div className="wheel-guide__head"><div><span className="eyebrow">Every result, before you spin</span><h2 id="wheel-guide-title">Wheel Guide</h2></div><button type="button" onClick={onToggleList} aria-expanded={listOpen}>{listOpen ? "Hide list" : "List view"}</button></div>
+      <article className="wedge-inspector" aria-live="polite"><span>{inspected.symbol}</span><div><small>{detail.timing}</small><h3>{detail.title}</h3><p>{detail.summary}</p><ul><li>{detail.points}</li><li>{detail.turn}</li><li>{detail.nextAction}</li></ul></div></article>
+      {listOpen ? <div className="wheel-list" aria-label="All wheel wedges">{WEDGES.map((wedge, index) => <button type="button" key={wedge.id} onClick={() => onInspect(wedge)} onFocus={() => onInspect(wedge)}><i style={{ background: wedge.color }}>{String(index + 1).padStart(2, "0")}</i><span><b>{wedge.label}</b><small>{explainWedge(wedge).summary}</small></span></button>)}</div> : <div className="wheel-guide__specials">{specials.map((wedge) => <button type="button" key={wedge.id} className={inspected.id === wedge.id ? "is-active" : ""} onMouseEnter={() => onInspect(wedge)} onFocus={() => onInspect(wedge)} onClick={() => onInspect(wedge)}><i>{wedge.symbol}</i><span><b>{wedge.label}</b><small>{explainWedge(wedge).summary}</small></span></button>)}</div>}
+      <p className="wheel-guide__cash"><b>Numbered wedges</b> Correct consonants earn the shown amount for every matching copy.</p>
+    </section>
   );
 }
 
@@ -214,6 +256,11 @@ export default function SiteApp() {
   const [guessed, setGuessed] = useState<string[]>([]);
   const [rotation, setRotation] = useState(0);
   const [currentWedge, setCurrentWedge] = useState<Wedge | null>(null);
+  const [wheelState, setWheelState] = useState<WheelState>("idle");
+  const [inspectedWedge, setInspectedWedge] = useState<Wedge>(WEDGES[0]);
+  const [wheelListOpen, setWheelListOpen] = useState(false);
+  const [letterSummary, setLetterSummary] = useState("");
+  const [freeVowelSelection, setFreeVowelSelection] = useState(false);
   const [letterValue, setLetterValue] = useState(0);
   const [letterMultiplier, setLetterMultiplier] = useState(1);
   const [roundIndex, setRoundIndex] = useState(0);
@@ -235,6 +282,12 @@ export default function SiteApp() {
   const [hasSave, setHasSave] = useState(false);
   const [activeMobilePanel, setActiveMobilePanel] = useState<"board" | "wheel">("board");
   const tone = useTone(settings.audio.master && settings.audio.interface);
+  const wheelTone = useTone(settings.audio.master && settings.audio.wheel);
+  const spinLockRef = useRef(createSpinLock());
+  const resolutionLockRef = useRef(false);
+  const spinIdRef = useRef(0);
+  const spinTimerRef = useRef<number | null>(null);
+  const tickTimerRef = useRef<number | null>(null);
 
   const enabledCustomPuzzles = useMemo(() => packs.filter((pack) => pack.enabled).flatMap((pack) => pack.puzzles), [packs]);
   const activeBank = useMemo(() => [...puzzlesForMode(mode), ...enabledCustomPuzzles], [mode, enabledCustomPuzzles]);
@@ -244,6 +297,24 @@ export default function SiteApp() {
   const remainingConsonants = CONSONANTS.filter((letter) => !guessed.includes(letter));
   const remainingVowels = VOWELS.filter((letter) => !guessed.includes(letter));
   const winnerIndex = players.reduce((best, player, index, list) => player.matchPoints > (list[best]?.matchPoints ?? -1) ? index : best, 0);
+  const canSpinNow = canRequestSpin(wheelState, phase, Boolean(activePlayer && isHumanTurn));
+  const highestWheelValue = Math.max(...WEDGES.map((wedge) => wedge.points ?? 0));
+  const dangerCount = WEDGES.filter((wedge) => wedge.kind === "compost" || wedge.kind === "lost-turn").length;
+  const specialNames = WEDGES.filter((wedge) => !["points", "compost", "lost-turn"].includes(wedge.kind)).slice(0, 4).map((wedge) => wedge.label).join(", ");
+  const spinDurationMs = settings.reducedMotion ? 180 : settings.animationSpeed === "show" ? 3400 : settings.animationSpeed === "quick" ? 1900 : 320;
+  const actionStatus = (() => {
+    if (!activePlayer) return { title: "Stage preparing", detail: "Contestants and the puzzle board are loading.", note: "" };
+    if (wheelState === "spinning" || phase === "spinning") return { title: "The wheel is spinning", detail: "Controls are locked until it stops on one predetermined wedge.", note: "No additional spin input will be accepted." };
+    if (wheelState === "resolving" || phase === "turn-transition") return { title: currentWedge?.label ?? "Resolving result", detail: hostLine, note: "The wheel will remain stationary." };
+    if (!isHumanTurn) return { title: `Waiting for ${activePlayer.name}`, detail: "The AI is reading only the visible pattern and choosing one action.", note: "Wheel controls remain locked." };
+    if (phase === "selecting-consonant") return { title: `${currentWedge?.label ?? `${letterValue.toLocaleString()} Grow Points`} per match`, detail: `Choose one unused consonant. ${letterValue.toLocaleString()} × ${letterMultiplier} is active for every match.`, note: "The wheel stays locked until the letter is resolved." };
+    if (phase === "selecting-vowel") return { title: currentWedge?.kind === "free-vowel" ? "Free Vowel" : "Choose a vowel", detail: currentWedge?.kind === "free-vowel" ? "Choose one unused vowel at no cost." : `Choose one unused vowel for ${settings.vowelCost.toLocaleString()} Grow Points.`, note: "The wheel stays stationary during selection." };
+    if (wheelState === "awaiting-special-choice") return { title: currentWedge?.label ?? "Special choice", detail: explainWedge(currentWedge ?? inspectedWedge).summary, note: explainWedge(currentWedge ?? inspectedWedge).nextAction };
+    if (phase === "revealing") return { title: freshLetter ? `Revealing ${freshLetter}` : "Revealing letters", detail: "Sativa is presenting every matching tile and the score is being calculated.", note: "Controls unlock when the reveal is complete." };
+    if (letterSummary) return { title: "Result resolved", detail: letterSummary, note: "Inspect the wheel, then choose your next action." };
+    return { title: "Your turn", detail: "Inspect the wheel and its guide, then press Spin the Wheel.", note: "You may also buy a vowel or solve the board." };
+  })();
+  const spinButtonCopy = !isHumanTurn ? { title: `Waiting for ${activePlayer?.name ?? "AI"}`, detail: "AI turn" } : wheelState === "spinning" ? { title: "Spinning…", detail: "controls locked" } : phase === "selecting-consonant" ? { title: "Choose a consonant", detail: "resolve this wedge" } : wheelState === "resolving" || phase === "turn-transition" ? { title: "Resolving result…", detail: "wheel locked" } : wheelState === "awaiting-special-choice" || phase === "selecting-vowel" ? { title: "Complete the choice", detail: "wheel locked" } : { title: "Spin the Wheel", detail: "one spin · one result" };
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -253,6 +324,11 @@ export default function SiteApp() {
       setHasSave(Boolean(window.localStorage.getItem(SAVE_KEY)));
     }, 0);
     return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => () => {
+    if (spinTimerRef.current !== null) window.clearTimeout(spinTimerRef.current);
+    if (tickTimerRef.current !== null) window.clearInterval(tickTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -268,9 +344,9 @@ export default function SiteApp() {
 
   useEffect(() => {
     if (view !== "game" || !players.length || phase === "landing" || phase === "setup") return;
-    const snapshot: SavedGame = { mode, phase, players, playerIndex, puzzle, guessed, rotation, roundIndex, roundsTotal, hostLine, hintUsed, startedAt, currentWedge, letterValue, letterMultiplier, bonusPuzzle, bonusGuessed, bonusPicks, bonusSeconds, bonusResult };
+    const snapshot: SavedGame = { mode, phase, players, playerIndex, puzzle, guessed, rotation, roundIndex, roundsTotal, hostLine, hintUsed, startedAt, currentWedge, letterValue, letterMultiplier, bonusPuzzle, bonusGuessed, bonusPicks, bonusSeconds, bonusResult, wheelState };
     saveActiveGame(snapshot);
-  }, [view, mode, phase, players, playerIndex, puzzle, guessed, rotation, roundIndex, roundsTotal, hostLine, hintUsed, startedAt, currentWedge, letterValue, letterMultiplier, bonusPuzzle, bonusGuessed, bonusPicks, bonusSeconds, bonusResult]);
+  }, [view, mode, phase, players, playerIndex, puzzle, guessed, rotation, roundIndex, roundsTotal, hostLine, hintUsed, startedAt, currentWedge, letterValue, letterMultiplier, bonusPuzzle, bonusGuessed, bonusPicks, bonusSeconds, bonusResult, wheelState]);
 
   useEffect(() => {
     if (mode !== "sprint" || view !== "game" || !["awaiting-action", "selecting-consonant", "selecting-vowel", "solving"].includes(phase)) return;
@@ -304,101 +380,178 @@ export default function SiteApp() {
 
   const advanceTurn = (message?: string) => {
     if (message) setHostLine(message);
+    setWheelState("resolving");
     setPhase("turn-transition");
     window.setTimeout(() => {
       setPlayerIndex((current) => nextPlayerIndex(players, current));
-      setCurrentWedge(null);
       setLetterValue(0);
       setLetterMultiplier(1);
+      setWheelState("idle");
+      spinLockRef.current.release();
+      resolutionLockRef.current = false;
       setPhase("awaiting-action");
     }, settings.reducedMotion ? 80 : 520);
   };
 
+  const announceLandedWedge = (wedge: Wedge) => {
+    if (!settings.audio.master || !settings.audio.announcer || typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const detail = explainWedge(wedge);
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(`The wheel stopped on ${wedge.label}. ${detail.nextAction}`));
+  };
+
   const resolveWedge = (wedge: Wedge) => {
+    setWheelState("resolving");
     setCurrentWedge(wedge);
+    setInspectedWedge(wedge);
+    announceLandedWedge(wedge);
     tone(wedge.kind === "compost" ? 120 : 520, 0.16, wedge.kind === "compost" ? "sawtooth" : "triangle");
     if (!activePlayer) return;
     if (wedge.kind === "compost") {
+      const lost = activePlayer.roundPoints;
       const result = applyCompost(activePlayer);
       updatePlayer(playerIndex, () => result.player);
       setStats((value) => ({ ...value, compostCount: value.compostCount + 1 }));
-      advanceTurn(result.protected ? "The IPM Shield held. Your round points stay protected." : randomLine("compost"));
+      advanceTurn(result.protected ? "The IPM Shield held. Your round points stay protected." : `Compost Pile. ${lost.toLocaleString()} unbanked Grow Points were lost; completed-round winnings remain safe.`);
       return;
     }
     if (wedge.kind === "lost-turn") {
       advanceTurn("Lost the Light Cycle. The next grower gets the controls.");
       return;
     }
-    if (["free-vowel", "wild", "shield", "clone-keeper"].includes(wedge.kind)) {
+    if (wedge.kind === "free-vowel") {
+      setLetterValue(0);
+      setLetterMultiplier(1);
+      setWheelState("awaiting-special-choice");
+      setFreeVowelSelection(true);
+      setPhase("selecting-vowel");
+      setHostLine("Free Vowel. Choose one unused vowel at no cost.");
+      return;
+    }
+    if (["wild", "shield", "clone-keeper"].includes(wedge.kind)) {
       updatePlayer(playerIndex, (player) => ({
         ...player,
         tokens: {
           ...player.tokens,
-          freeVowel: player.tokens.freeVowel + (wedge.kind === "free-vowel" ? 1 : 0),
+          freeVowel: player.tokens.freeVowel,
           wild: player.tokens.wild + (wedge.kind === "wild" ? 1 : 0),
           shield: player.tokens.shield + (wedge.kind === "shield" ? 1 : 0),
           cloneKeeper: player.tokens.cloneKeeper + (wedge.kind === "clone-keeper" ? 1 : 0),
         },
       }));
       setHostLine(`${wedge.label} banked. You still control the wheel.`);
+      setWheelState("idle");
+      spinLockRef.current.release();
       setPhase("awaiting-action");
       return;
     }
     if (wedge.kind === "mystery") {
-      const packet = Math.random();
-      if (packet < 0.18) {
-        const result = applyCompost(activePlayer);
-        updatePlayer(playerIndex, () => result.player);
-        advanceTurn("The Mystery Seed opened into a Compost Pile. That packet was all risk.");
-      } else {
-        const reward = packet > 0.78 ? 1800 : 800;
-        updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: player.roundPoints + reward }));
-        setHostLine(`Rare keeper! The Mystery Seed produced ${reward.toLocaleString()} Grow Points.`);
-        setPhase("awaiting-action");
-      }
+      setWheelState("awaiting-special-choice");
+      setPhase("awaiting-action");
+      setHostLine("Mystery Seed. Keep a safe 400-point reward or open the packet for a hidden result.");
       return;
     }
     if (wedge.kind === "risk") {
-      const doubled = Math.random() >= 0.45;
-      updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: doubled ? player.roundPoints * 2 + 500 : Math.floor(player.roundPoints / 2) }));
-      setHostLine(doubled ? "Risk paid off. The crop doubled and added a 500-point kicker." : "The gamble cut the round bank in half. The plant still stands.");
+      setWheelState("awaiting-special-choice");
       setPhase("awaiting-action");
+      setHostLine("Risk the Crop. Keep your round bank safe or risk half for a chance to double it and add 500.");
       return;
     }
     const multiplier = wedge.kind === "double" ? 2 : wedge.kind === "triple" ? 3 : 1;
     setLetterMultiplier(multiplier);
     setLetterValue(wedge.points ?? 500);
+    setWheelState("awaiting-letter");
     setPhase("selecting-consonant");
     setHostLine(`${wedge.label}. Select an unused consonant.`);
   };
 
-  const spin = () => {
-    if (phase !== "awaiting-action" || !activePlayer) return;
+  const requestSpin = () => {
+    if (!canRequestSpin(wheelState, phase, Boolean(activePlayer && isHumanTurn)) || !spinLockRef.current.request() || !activePlayer) return;
+    const spinId = ++spinIdRef.current;
     setPhase("spinning");
+    setWheelState("spinning");
+    resolutionLockRef.current = false;
+    setFreeVowelSelection(false);
+    setLetterSummary("");
     setHostLine(`${activePlayer.name} sends the precision dial into motion.`);
-    const result = createSpin(rotation);
-    setRotation(result.finalRotation);
-    window.setTimeout(() => resolveWedge(result.wedge), settings.reducedMotion ? 180 : settings.animationSpeed === "show" ? 3400 : settings.animationSpeed === "quick" ? 1900 : 320);
+    const plan = createSpin(rotation);
+    setRotation(plan.finalRotation);
+    const duration = spinDurationMs;
+    if (settings.audio.master && settings.audio.wheel) {
+      tickTimerRef.current = window.setInterval(() => wheelTone(220 + Math.random() * 90, 0.025, "square"), settings.reducedMotion ? 120 : 95);
+    }
+    if (import.meta.env.DEV && window.localStorage.getItem("ggs:wheel-debug") === "true") {
+      console.table({ spinId, startingAngle: plan.startingRotation, targetRotation: plan.finalRotation, finalNormalizedAngle: plan.finalNormalizedAngle, selectedWedgeIndex: plan.wedgeIndex, selectedWedgeLabel: plan.wedge.label });
+    }
+    spinTimerRef.current = window.setTimeout(() => {
+      if (spinIdRef.current !== spinId) return;
+      if (tickTimerRef.current !== null) window.clearInterval(tickTimerRef.current);
+      tickTimerRef.current = null;
+      resolveWedge(plan.wedge);
+    }, duration);
+  };
+
+  const resolveMysteryChoice = (choice: "safe" | "open") => {
+    if (!activePlayer || currentWedge?.kind !== "mystery" || wheelState !== "awaiting-special-choice" || resolutionLockRef.current) return;
+    resolutionLockRef.current = true;
+    if (choice === "safe") {
+      updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: player.roundPoints + 400 }));
+      setHostLine("Mystery Seed secured: 400 safe Grow Points. You keep control.");
+      setWheelState("idle");
+      spinLockRef.current.release();
+      return;
+    }
+    const packet = Math.random();
+    if (packet < 0.18) {
+      const result = applyCompost(activePlayer);
+      updatePlayer(playerIndex, () => result.player);
+      advanceTurn("The Mystery Seed opened into a Compost Pile. That packet was all risk.");
+    } else {
+      const reward = packet > 0.78 ? 1800 : 800;
+      updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: player.roundPoints + reward }));
+      setHostLine(`Rare keeper! The Mystery Seed produced ${reward.toLocaleString()} Grow Points. You keep control.`);
+      setWheelState("idle");
+      spinLockRef.current.release();
+    }
+  };
+
+  const resolveRiskChoice = (choice: "safe" | "risk") => {
+    if (!activePlayer || currentWedge?.kind !== "risk" || wheelState !== "awaiting-special-choice" || resolutionLockRef.current) return;
+    resolutionLockRef.current = true;
+    if (choice === "safe") {
+      setHostLine("Crop protected. Your current round bank stays intact and you keep control.");
+    } else {
+      const doubled = Math.random() >= 0.45;
+      updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: doubled ? player.roundPoints * 2 + 500 : Math.floor(player.roundPoints / 2) }));
+      setHostLine(doubled ? "Risk paid off. The crop doubled and added a 500-point kicker." : "The gamble cut the round bank in half. The plant still stands.");
+    }
+    setWheelState("idle");
+    spinLockRef.current.release();
   };
 
   const guessLetter = (letter: string, vowel = false) => {
-    if (!activePlayer || guessed.includes(letter)) return;
+    if (!activePlayer || guessed.includes(letter) || resolutionLockRef.current) return;
     const allowedPhase = vowel ? "selecting-vowel" : "selecting-consonant";
     if (phase !== allowedPhase) return;
+    resolutionLockRef.current = true;
     const matches = countLetter(puzzle.answer, letter);
+    const appliedMultiplier = vowel ? 1 : letterMultiplier + (activePlayer.tokens.wild > 0 ? 1 : 0);
     setGuessed((current) => [...current, letter]);
     setFreshLetter(letter);
+    setFreeVowelSelection(false);
+    setWheelState("complete");
     setPhase("revealing");
     if (vowel) {
+      const freeFromWheel = freeVowelSelection;
       updatePlayer(playerIndex, (player) => ({
         ...player,
-        roundPoints: player.tokens.freeVowel ? player.roundPoints : Math.max(0, player.roundPoints - settings.vowelCost),
-        tokens: { ...player.tokens, freeVowel: Math.max(0, player.tokens.freeVowel - 1) },
+        roundPoints: freeFromWheel || player.tokens.freeVowel ? player.roundPoints : Math.max(0, player.roundPoints - settings.vowelCost),
+        tokens: { ...player.tokens, freeVowel: freeFromWheel ? player.tokens.freeVowel : Math.max(0, player.tokens.freeVowel - 1) },
       }));
       setStats((value) => ({ ...value, vowelsPurchased: value.vowelsPurchased + 1 }));
     } else if (matches > 0) {
       const wildBonus = activePlayer.tokens.wild > 0 ? 1 : 0;
-      const reward = matches * letterValue * (letterMultiplier + wildBonus);
+      const reward = matches * letterValue * appliedMultiplier;
       updatePlayer(playerIndex, (player) => ({ ...player, roundPoints: player.roundPoints + reward, tokens: { ...player.tokens, wild: Math.max(0, player.tokens.wild - wildBonus) } }));
       setStats((value) => ({ ...value, consonants: { ...value.consonants, [letter]: (value.consonants[letter] ?? 0) + 1 } }));
     }
@@ -407,12 +560,20 @@ export default function SiteApp() {
       setFreshLetter(undefined);
       if (matches > 0) {
         tone(vowel ? 640 : 740, 0.12, "triangle");
-        setHostLine(vowel ? randomLine("vowel") : `${matches} match${matches === 1 ? "" : "es"}. ${randomLine("correct")}`);
-        setCurrentWedge(null);
+        const earned = vowel ? 0 : matches * letterValue * appliedMultiplier;
+        const summary = vowel ? `${matches} vowel match${matches === 1 ? "" : "es"}. You keep the turn.` : `${matches} match${matches === 1 ? "" : "es"}. ${matches} × ${(letterValue * appliedMultiplier).toLocaleString()} = ${earned.toLocaleString()} Grow Points. You keep the turn.`;
+        setLetterSummary(summary);
+        setHostLine(vowel ? `${summary} ${randomLine("vowel")}` : `${summary} ${randomLine("correct")}`);
+        setWheelState("idle");
+        spinLockRef.current.release();
+        resolutionLockRef.current = false;
         setPhase("awaiting-action");
       } else {
         tone(150, 0.18, "square");
-        advanceTurn(randomLine("miss"));
+        const nextName = players[nextPlayerIndex(players, playerIndex)]?.name ?? "the next grower";
+        const summary = `No matches. No points awarded. The turn passes to ${nextName}.`;
+        setLetterSummary(summary);
+        advanceTurn(`${summary} ${randomLine("miss")}`);
       }
     }, delay);
   };
@@ -424,6 +585,9 @@ export default function SiteApp() {
       setHostLine(availability.reason);
       return;
     }
+    setWheelState("awaiting-letter");
+    resolutionLockRef.current = false;
+    setFreeVowelSelection(false);
     setPhase("selecting-vowel");
     setHostLine(`${availability.reason} Choose an unused vowel.`);
   };
@@ -446,6 +610,8 @@ export default function SiteApp() {
       }));
       setGuessed([...new Set([...guessed, ...puzzle.answer.replace(/[^A-Z]/g, "")])]);
       setHostLine(randomLine("solve"));
+      setWheelState("complete");
+      spinLockRef.current.release();
       setPhase("round-complete");
       tone(880, 0.28, "triangle");
       return;
@@ -464,6 +630,11 @@ export default function SiteApp() {
     setGuessed([]);
     setRoundIndex(0);
     setRotation(0);
+    setCurrentWedge(null);
+    setWheelState("idle");
+    setLetterSummary("");
+    setFreeVowelSelection(false);
+    spinLockRef.current.release();
     setHintUsed(false);
     setStartedAt(Date.now());
     setSprintSeconds(120);
@@ -475,6 +646,8 @@ export default function SiteApp() {
   };
 
   const beginRound = () => {
+    setWheelState("idle");
+    spinLockRef.current.release();
     setPhase("awaiting-action");
     setHostLine(`${roundNames[Math.min(roundIndex, roundNames.length - 1)]}. ${players[playerIndex]?.name} has first spin.`);
   };
@@ -496,6 +669,9 @@ export default function SiteApp() {
     setHintUsed(false);
     setStartedAt(Date.now());
     setCurrentWedge(null);
+    setWheelState("complete");
+    setLetterSummary("");
+    setFreeVowelSelection(false);
     setPhase("round-start");
   };
 
@@ -548,8 +724,11 @@ export default function SiteApp() {
       setHasSave(false);
       return;
     }
+    const resumed = safeResumedWheelState(saved.phase, saved.wheelState);
     setMode(saved.mode);
-    setPhase(["spinning", "revealing", "turn-transition"].includes(saved.phase) ? "awaiting-action" : saved.phase);
+    setPhase(resumed.phase);
+    setWheelState(resumed.wheelState);
+    spinLockRef.current.release();
     setPlayers(saved.players);
     setPlayerIndex(saved.playerIndex);
     setPuzzle(saved.puzzle);
@@ -561,6 +740,7 @@ export default function SiteApp() {
     setHintUsed(saved.hintUsed);
     setStartedAt(saved.startedAt);
     setCurrentWedge(saved.currentWedge ?? null);
+    setFreeVowelSelection(saved.phase === "selecting-vowel" && saved.currentWedge?.kind === "free-vowel");
     setLetterValue(saved.letterValue ?? 0);
     setLetterMultiplier(saved.letterMultiplier ?? 1);
     setBonusPuzzle(saved.bonusPuzzle ?? null);
@@ -575,9 +755,11 @@ export default function SiteApp() {
     if (view !== "game" || !activePlayer || activePlayer.kind !== "ai") return;
     if (phase === "awaiting-action") {
       const timer = window.setTimeout(() => {
+        if (wheelState === "awaiting-special-choice" && currentWedge?.kind === "mystery") { resolveMysteryChoice("safe"); return; }
+        if (wheelState === "awaiting-special-choice" && currentWedge?.kind === "risk") { resolveRiskChoice(activePlayer.roundPoints < 800 ? "safe" : "risk"); return; }
         const solve = chooseAiSolve(solvedPattern, puzzle.category, activeBank, 0.72);
         if (solve && Math.random() > 0.12) submitSolve(solve);
-        else spin();
+        else requestSpin();
       }, settings.reducedMotion ? 100 : 720);
       return () => window.clearTimeout(timer);
     }
@@ -588,12 +770,28 @@ export default function SiteApp() {
       }, settings.reducedMotion ? 100 : 620);
       return () => window.clearTimeout(timer);
     }
+    if (phase === "selecting-vowel") {
+      const timer = window.setTimeout(() => {
+        const letter = ["E", "A", "I", "O", "U"].find((candidate) => !guessed.includes(candidate));
+        if (letter) guessLetter(letter, true);
+      }, settings.reducedMotion ? 100 : 620);
+      return () => window.clearTimeout(timer);
+    }
   // The turn token and phase are the deliberate scheduling boundary; action
   // functions always read the render that created this timer.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, phase, activePlayer?.id, solvedPattern]);
+  }, [view, phase, activePlayer?.id, solvedPattern, wheelState, currentWedge?.kind]);
 
   const navigate = (target: View) => {
+    if (target !== "game") {
+      spinIdRef.current += 1;
+      if (spinTimerRef.current !== null) window.clearTimeout(spinTimerRef.current);
+      if (tickTimerRef.current !== null) window.clearInterval(tickTimerRef.current);
+      spinTimerRef.current = null;
+      tickTimerRef.current = null;
+      spinLockRef.current.release();
+      setWheelState("idle");
+    }
     setView(target);
     if (target === "home") setPhase("landing");
     window.scrollTo({ top: 0, behavior: settings.reducedMotion ? "auto" : "smooth" });
@@ -751,7 +949,7 @@ export default function SiteApp() {
               <button className="back-link" onClick={() => navigate("home")}>← Lobby</button>
               <div className="game-toolbar__round"><span>{roundNames[Math.min(roundIndex, roundNames.length - 1)]}</span><b>Round {roundIndex + 1} / {roundsTotal}</b></div>
               {mode === "sprint" && <div className="timer-chip"><span>Terpene Sprint</span><b>{Math.floor(sprintSeconds / 60)}:{String(sprintSeconds % 60).padStart(2, "0")}</b></div>}
-              <div className="game-toolbar__buttons"><button className="icon-button" onClick={() => setPhase((value) => value === "paused" ? "awaiting-action" : "paused")} aria-label="Pause game">Ⅱ</button><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings">⚙</button></div>
+              <div className="game-toolbar__buttons"><button className="icon-button" disabled={wheelState !== "idle" || (phase !== "awaiting-action" && phase !== "paused")} onClick={() => setPhase((value) => value === "paused" ? "awaiting-action" : "paused")} aria-label="Pause game">Ⅱ</button><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings">⚙</button></div>
             </div>
 
             {phase === "contestant-intro" && <div className="game-overlay"><span className="eyebrow">Tonight&apos;s contestants</span><h1>The grow lights are live</h1><div className="intro-players">{players.map((player, index) => <div key={player.id}><span>{String(index + 1).padStart(2, "0")}</span><b>{player.name}</b><small>{player.kind === "ai" ? `${player.persona} specialist · honest pattern solver` : "human contestant"}</small></div>)}</div><button className="button button--hero" onClick={beginRound}>Begin Quick Clone <span>→</span></button></div>}
@@ -762,32 +960,38 @@ export default function SiteApp() {
               {players.map((player, index) => <div className={`player-podium ${index === playerIndex ? "is-active" : ""}`} key={player.id}><span className="player-podium__light" /><div><small>{player.kind === "ai" ? player.persona : `Contestant ${index + 1}`}</small><strong>{player.name}</strong></div><div className="player-podium__score"><small>Match</small><b>{player.matchPoints.toLocaleString()}</b><span>+ {player.roundPoints.toLocaleString()} round</span></div><div className="token-row">{player.tokens.shield > 0 && <i title="IPM Shield">⬡ {player.tokens.shield}</i>}{player.tokens.wild > 0 && <i title="Wild Terpene">✦ {player.tokens.wild}</i>}{player.tokens.cloneKeeper > 0 && <i title="Clone Keeper">↟ {player.tokens.cloneKeeper}</i>}{player.tokens.freeVowel > 0 && <i title="Free Vowel">A {player.tokens.freeVowel}</i>}{mode === "party" && <><button aria-label={`Subtract 100 points from ${player.name}`} onClick={() => updatePlayer(index, (value) => ({ ...value, roundPoints: Math.max(0, value.roundPoints - 100) }))}>−</button><button aria-label={`Add 100 points to ${player.name}`} onClick={() => updatePlayer(index, (value) => ({ ...value, roundPoints: value.roundPoints + 100 }))}>+</button></>}</div></div>)}
             </div>
 
-            <div className="game-mobile-tabs"><button className={activeMobilePanel === "board" ? "is-active" : ""} onClick={() => setActiveMobilePanel("board")}>Puzzle board</button><button className={activeMobilePanel === "wheel" ? "is-active" : ""} onClick={() => setActiveMobilePanel("wheel")}>Spin wheel</button></div>
+            <div className="game-mobile-tabs"><button className={activeMobilePanel === "board" ? "is-active" : ""} onClick={() => setActiveMobilePanel("board")}>View Puzzle Board</button><button className={activeMobilePanel === "wheel" ? "is-active" : ""} onClick={() => setActiveMobilePanel("wheel")}>View Wheel</button></div>
+
+            <section className={`action-status action-status--${wheelState}`} aria-live="polite"><div><span>{isHumanTurn ? "Your turn" : "Contestant turn"}</span><h2>{actionStatus.title}</h2></div><p>{actionStatus.detail}</p><small>{actionStatus.note}</small></section>
 
             <div className="game-stage">
+              <aside className={`game-stage__wheel ${activeMobilePanel === "wheel" ? "is-mobile-active" : ""}`}>
+                <div className={`pointer-result pointer-result--${wheelState}`} aria-live="polite"><small>{wheelState === "spinning" ? "Live pointer status" : currentWedge ? "Final pointer result" : "Pointer status"}</small><strong>{wheelState === "spinning" ? "Spinning…" : currentWedge ? `Landed on: ${currentWedge.label}` : "Ready to spin"}</strong><span>{wheelState === "spinning" ? "Preview is not final · controls locked" : currentWedge ? `${currentWedge.symbol} result locked to the final wheel angle` : `${WEDGES[getWedgeIndex(rotation)].label} is currently beneath the pointer`}</span></div>
+                <Wheel rotation={rotation} spinning={wheelState === "spinning"} selectedWedge={currentWedge} inspectedWedge={inspectedWedge} onInspect={setInspectedWedge} durationMs={spinDurationMs} />
+                <div className="wheel-outlook"><div><span className="eyebrow">Wheel outlook</span><b>Know the field before you spin</b></div><dl><div><dt>Highest value</dt><dd>{highestWheelValue.toLocaleString()}</dd></div><div><dt>Danger wedges</dt><dd>{dangerCount}</dd></div><div><dt>Featured specials</dt><dd>{specialNames}</dd></div><div><dt>Current jackpot</dt><dd>{(8750 + roundIndex * 250).toLocaleString()}</dd></div></dl></div>
+                <WheelGuide inspected={inspectedWedge} onInspect={setInspectedWedge} listOpen={wheelListOpen} onToggleList={() => setWheelListOpen((value) => !value)} />
+                <p className="sr-only">Current wheel wedges: {WEDGES.map((wedge) => `${wedge.label}: ${explainWedge(wedge).summary}`).join(" ")}</p>
+              </aside>
+
               <div className={`game-stage__board ${activeMobilePanel === "board" ? "is-mobile-active" : ""}`}>
                 <div className="board-heading"><div><span className="eyebrow">Current category</span><h1>{phase.startsWith("bonus") || phase === "bonus-result" ? bonusPuzzle?.category : puzzle.category}</h1></div><div><span>{phase.startsWith("bonus") || phase === "bonus-result" ? bonusPuzzle?.difficulty : puzzle.difficulty}</span><b>{phase.startsWith("bonus") || phase === "bonus-result" ? "Harvest Vault" : roundNames[Math.min(roundIndex, roundNames.length - 1)]}</b></div></div>
                 <div className="board-set">
                   <div className="board-lights" aria-hidden="true" />
                   {bonusPuzzle && (phase.startsWith("bonus") || phase === "bonus-result") ? <PuzzleBoard answer={bonusPuzzle.answer} guessed={bonusGuessed} revealAll={phase === "bonus-result"} /> : <PuzzleBoard answer={puzzle.answer} guessed={guessed} revealAll={phase === "round-complete" || phase === "match-complete"} freshLetter={freshLetter} />}
-                  <div className="sativa-station"><CharacterPortrait person="sativa" mood={freshLetter ? "reveal" : "idle"} /><div><small>Sativa Starling</small><b>{freshLetter ? `Revealing ${freshLetter}` : phase === "revealing" ? "Moving to the board" : "Board ready"}</b></div></div>
+                  <div className={`sativa-station sativa-station--${currentWedge?.kind === "compost" && wheelState === "resolving" ? "shock" : phase === "round-complete" ? "celebrate" : freshLetter ? "reveal" : "idle"}`}><CharacterPortrait person="sativa" mood={currentWedge?.kind === "compost" && wheelState === "resolving" ? "shock" : phase === "round-complete" ? "celebrate" : freshLetter ? "reveal" : "idle"} round={roundIndex} quality={settings.presenterQuality} /><div><small>Sativa Starling · {sativaLooks[roundIndex % sativaLooks.length].name}</small><b>{freshLetter ? `Presenting ${freshLetter}` : phase === "revealing" ? "Moving to the board" : phase === "round-complete" ? "Celebrating the solve" : currentWedge?.kind === "compost" && wheelState === "resolving" ? "Reacting to Compost Pile" : "Board ready"}</b></div></div>
                 </div>
                 {!phase.startsWith("bonus") && phase !== "bonus-result" && <div className="used-letters"><span>Used consonants</span><div>{CONSONANTS.map((letter) => <i className={guessed.includes(letter) ? "is-used" : ""} key={letter}>{letter}</i>)}</div><span>Used vowels</span><div>{VOWELS.map((letter) => <i className={guessed.includes(letter) ? "is-used" : ""} key={letter}>{letter}</i>)}</div></div>}
               </div>
 
-              <aside className={`game-stage__wheel ${activeMobilePanel === "wheel" ? "is-mobile-active" : ""}`}>
-                <Wheel rotation={rotation} spinning={phase === "spinning"} />
-                <div className="wheel-result" aria-live="polite"><small>Last result</small><strong>{currentWedge?.label ?? "Precision dial ready"}</strong><span>{currentWedge ? `${currentWedge.symbol} actual angle locked` : "Spin, buy a vowel, or solve"}</span></div>
-              </aside>
             </div>
 
             {!phase.startsWith("bonus") && phase !== "bonus-result" && <div className="game-console">
               <div className="host-console"><CharacterPortrait person="bud" mood={phase === "round-complete" ? "celebrate" : "idle"} /><div><span className="eyebrow">Bud Blazington says</span><p aria-live="polite">“{hostLine}”</p></div></div>
               <div className="action-console">
-                {(phase === "selecting-consonant" || phase === "selecting-vowel") && isHumanTurn && <div className="letter-picker"><span>{phase === "selecting-vowel" ? "Choose a vowel" : `Choose a consonant · ${letterValue.toLocaleString()} × ${letterMultiplier}`}</span><div>{(phase === "selecting-vowel" ? remainingVowels : remainingConsonants).map((letter) => <button key={letter} onClick={() => guessLetter(letter, phase === "selecting-vowel")}>{letter}</button>)}</div><button className="text-link" onClick={() => setPhase("awaiting-action")}>Cancel selection</button></div>}
+                {(phase === "selecting-consonant" || phase === "selecting-vowel") && isHumanTurn && <div className="letter-picker"><span>{phase === "selecting-vowel" ? currentWedge?.kind === "free-vowel" ? "Free vowel · choose one unused vowel" : `Choose a vowel · ${settings.vowelCost.toLocaleString()} Grow Points` : `${(letterValue * letterMultiplier).toLocaleString()} Grow Points per match · choose a consonant`}</span><div>{(phase === "selecting-vowel" ? remainingVowels : remainingConsonants).map((letter) => <button key={letter} onClick={() => guessLetter(letter, phase === "selecting-vowel")}>{letter}</button>)}</div><small>One valid letter resolves this action. The wheel remains locked.</small></div>}
                 {phase === "round-complete" ? <div className="round-complete-card"><span className="eyebrow">Knowledge unlocked</span><h3>{puzzle.answer}</h3><p>{puzzle.educationalNote}</p><button className="button button--gold" onClick={nextRound}>{roundIndex + 1 >= roundsTotal ? "Crown the winner" : "Next round"} <span>→</span></button></div> : <>
-                  <div className="primary-actions"><button className="action-button action-button--spin" disabled={phase !== "awaiting-action" || !isHumanTurn} title={phase !== "awaiting-action" ? "Wait for the current action to finish." : !isHumanTurn ? "AI contestant is thinking from the visible pattern." : "Spin the precision wheel"} onClick={spin}><span>↻</span><b>Spin</b><small>the grow dial</small></button><button className="action-button" disabled={phase !== "awaiting-action" || !isHumanTurn || !activePlayer || !canBuyVowel(activePlayer, guessed, settings.vowelCost).allowed} title={activePlayer ? canBuyVowel(activePlayer, guessed, settings.vowelCost).reason : "No active player"} onClick={openVowels}><span>A·E</span><b>Buy vowel</b><small>{activePlayer?.tokens.freeVowel ? "free token" : `${settings.vowelCost} points`}</small></button><button className="action-button" disabled={phase !== "awaiting-action" || !isHumanTurn} onClick={() => setPhase("solving")}><span>✓</span><b>Solve</b><small>the full board</small></button></div>
-                  <div className="secondary-actions"><button disabled={hintUsed || phase !== "awaiting-action" || !isHumanTurn} onClick={() => { setHintUsed(true); setHostLine(`Educational hint: ${puzzle.hint}`); }}>◌ Hint {hintUsed ? "used" : ""}</button><button onClick={() => setRulesOpen(true)}>◇ Rules</button><button onClick={() => setSettingsOpen(true)}>♫ Audio</button><button onClick={() => setPhase("paused")}>Ⅱ Pause</button></div>
+                  {wheelState === "awaiting-special-choice" && currentWedge?.kind === "mystery" ? <div className="special-choice"><div><span>{currentWedge.symbol}</span><section><small>Decision required</small><h3>Mystery Seed</h3><p>Take 400 guaranteed Grow Points, or open the packet for a hidden reward or Compost risk.</p></section></div><button className="button button--gold" onClick={() => resolveMysteryChoice("safe")}>Keep safe 400</button><button className="button button--hero" onClick={() => resolveMysteryChoice("open")}>Open the packet</button></div> : wheelState === "awaiting-special-choice" && currentWedge?.kind === "risk" ? <div className="special-choice"><div><span>{currentWedge.symbol}</span><section><small>Decision required</small><h3>Risk the Crop</h3><p>Protect {activePlayer?.roundPoints.toLocaleString()} Grow Points, or risk half for a chance to double the bank and add 500.</p></section></div><button className="button button--gold" onClick={() => resolveRiskChoice("safe")}>Keep crop safe</button><button className="button button--hero" onClick={() => resolveRiskChoice("risk")}>Risk it</button></div> : <div className="primary-actions"><button className="action-button action-button--spin" disabled={!canSpinNow} title={canSpinNow ? "Starts exactly one spin. The final angle determines one result." : actionStatus.detail} onClick={requestSpin} onKeyDown={(event) => { if (event.code === "Space" && event.repeat) event.preventDefault(); }}><span>↻</span><b>{spinButtonCopy.title}</b><small>{spinButtonCopy.detail}</small></button><button className="action-button" disabled={phase !== "awaiting-action" || wheelState !== "idle" || !isHumanTurn || !activePlayer || !canBuyVowel(activePlayer, guessed, settings.vowelCost).allowed} title={activePlayer ? canBuyVowel(activePlayer, guessed, settings.vowelCost).reason : "No active player"} onClick={openVowels}><span>A·E</span><b>Buy vowel</b><small>{activePlayer?.tokens.freeVowel ? "free token" : `${settings.vowelCost} points`}</small></button><button className="action-button" disabled={phase !== "awaiting-action" || wheelState !== "idle" || !isHumanTurn} onClick={() => setPhase("solving")}><span>✓</span><b>Solve</b><small>the full board</small></button></div>}
+                  <div className="secondary-actions"><button disabled={hintUsed || phase !== "awaiting-action" || wheelState !== "idle" || !isHumanTurn} onClick={() => { setHintUsed(true); setHostLine(`Educational hint: ${puzzle.hint}`); }}>◌ Hint {hintUsed ? "used" : ""}</button><button onClick={() => setRulesOpen(true)}>◇ Rules</button><button onClick={() => setSettingsOpen(true)}>♫ Audio</button><button disabled={wheelState !== "idle" || phase !== "awaiting-action"} onClick={() => setPhase("paused")}>Ⅱ Pause</button></div>
                 </>}
               </div>
             </div>}
@@ -817,7 +1021,7 @@ export default function SiteApp() {
 
       <footer><BrandMark compact /><p>This game is designed for entertainment and cannabis education. It does not provide medical, legal, or cultivation advice and does not sell or distribute cannabis or cannabis products.</p><div><a href="https://discord.gg/YxJYnnKWHf" target="_blank" rel="noreferrer">GBS Discord</a><button onClick={() => navigate("about")}>Credits & legal</button><span>v1.0.0</span></div></footer>
 
-      {settingsOpen && <Modal title="Stage, sound & accessibility" onClose={() => setSettingsOpen(false)} wide><div className="settings-grid"><section><span className="eyebrow">Stage theme</span><div className="theme-picker">{[{ id: "green-room", label: "GBS Green Room", color: "#70f0b0" }, { id: "breeder-lab", label: "Breeder's Laboratory", color: "#4ed6ff" }, { id: "trichome", label: "Trichome Temple", color: "#d194ff" }, { id: "old-haze", label: "Old-School Haze", color: "#ffad5c" }, { id: "solventless", label: "Solventless Chamber", color: "#80d8ff" }, { id: "cosmic", label: "Cosmic Canopy", color: "#9c7cff" }, { id: "apollo", label: "Apollo Garden", color: "#ffd166" }].map((theme) => <button className={settings.theme === theme.id ? "is-selected" : ""} key={theme.id} onClick={() => setSettings((value) => ({ ...value, theme: theme.id }))}><i style={{ background: theme.color }} />{theme.label}</button>)}</div><span className="eyebrow settings-subhead">Accessibility</span><Toggle checked={settings.highContrast} onChange={(highContrast) => setSettings((value) => ({ ...value, highContrast }))} label="High contrast" detail="Sharper borders and simpler lighting" /><Toggle checked={settings.reducedMotion} onChange={(reducedMotion) => setSettings((value) => ({ ...value, reducedMotion }))} label="Reduced motion" detail="Shortens spins and removes ambient movement" /><Toggle checked={settings.largeText} onChange={(largeText) => setSettings((value) => ({ ...value, largeText }))} label="Larger text" detail="Raises the base interface scale" /><Toggle checked={settings.captions} onChange={(captions) => setSettings((value) => ({ ...value, captions }))} label="Captions" detail="Keep every spoken-style line visible" /></section><section><span className="eyebrow">Audio mixer</span>{Object.entries(settings.audio).map(([key, checked]) => <Toggle key={key} checked={checked} onChange={(next) => setSettings((value) => ({ ...value, audio: { ...value.audio, [key]: next } }))} label={key.replace(/\b\w/g, (letter) => letter.toUpperCase())} detail={key === "master" ? "All sound groups" : `${key} cues`} />)}<label className="range-label"><span><b>Vowel price</b><small>Configurable Grow Point cost</small></span><select value={settings.vowelCost} onChange={(event) => setSettings((value) => ({ ...value, vowelCost: Number(event.target.value) }))}><option value="150">150</option><option value="250">250</option><option value="350">350</option></select></label></section></div></Modal>}
+      {settingsOpen && <Modal title="Stage, sound & accessibility" onClose={() => setSettingsOpen(false)} wide><div className="settings-grid"><section><span className="eyebrow">Stage theme</span><div className="theme-picker">{[{ id: "green-room", label: "GBS Green Room", color: "#70f0b0" }, { id: "breeder-lab", label: "Breeder's Laboratory", color: "#4ed6ff" }, { id: "trichome", label: "Trichome Temple", color: "#d194ff" }, { id: "old-haze", label: "Old-School Haze", color: "#ffad5c" }, { id: "solventless", label: "Solventless Chamber", color: "#80d8ff" }, { id: "cosmic", label: "Cosmic Canopy", color: "#9c7cff" }, { id: "apollo", label: "Apollo Garden", color: "#ffd166" }].map((theme) => <button className={settings.theme === theme.id ? "is-selected" : ""} key={theme.id} onClick={() => setSettings((value) => ({ ...value, theme: theme.id }))}><i style={{ background: theme.color }} />{theme.label}</button>)}</div><span className="eyebrow settings-subhead">Accessibility</span><Toggle checked={settings.highContrast} onChange={(highContrast) => setSettings((value) => ({ ...value, highContrast }))} label="High contrast" detail="Sharper borders and simpler lighting" /><Toggle checked={settings.reducedMotion} onChange={(reducedMotion) => setSettings((value) => ({ ...value, reducedMotion }))} label="Reduced motion" detail="Shortens spins and removes ambient movement" /><Toggle checked={settings.largeText} onChange={(largeText) => setSettings((value) => ({ ...value, largeText }))} label="Larger text" detail="Raises the base interface scale" /><Toggle checked={settings.captions} onChange={(captions) => setSettings((value) => ({ ...value, captions }))} label="Captions" detail="Keep every spoken-style line visible" /><label className="range-label"><span><b>Presenter quality</b><small>Full Stage, reduced animation, or static artwork</small></span><select value={settings.presenterQuality} onChange={(event) => setSettings((value) => ({ ...value, presenterQuality: event.target.value as AppSettings["presenterQuality"] }))}><option value="full">Full Stage</option><option value="reduced">Reduced Animation</option><option value="static">Static Presenter</option></select></label></section><section><span className="eyebrow">Audio mixer</span>{Object.entries(settings.audio).map(([key, checked]) => <Toggle key={key} checked={checked} onChange={(next) => setSettings((value) => ({ ...value, audio: { ...value.audio, [key]: next } }))} label={key.replace(/\b\w/g, (letter) => letter.toUpperCase())} detail={key === "master" ? "All sound groups" : key === "wheel" ? "Wheel tick cues" : key === "announcer" ? "Spoken landed-wedge announcement" : `${key} cues`} />)}<label className="range-label"><span><b>Vowel price</b><small>Configurable Grow Point cost</small></span><select value={settings.vowelCost} onChange={(event) => setSettings((value) => ({ ...value, vowelCost: Number(event.target.value) }))}><option value="150">150</option><option value="250">250</option><option value="350">350</option></select></label></section></div></Modal>}
       {rulesOpen && <Modal title="Quick rules" onClose={() => setRulesOpen(false)}><div className="quick-rules"><p><b>Spin</b> to earn a consonant value. A correct letter keeps your turn.</p><p><b>Buy a vowel</b> for {settings.vowelCost} round points. A missing vowel passes control.</p><p><b>Solve</b> the complete board. Wrong solves end the turn without revealing the answer.</p><p><b>Compost Pile</b> clears unbanked points unless protected.</p></div><button className="button button--gold button--full" onClick={() => { setRulesOpen(false); navigate("how"); }}>Read complete rules</button></Modal>}
     </div>
   );
